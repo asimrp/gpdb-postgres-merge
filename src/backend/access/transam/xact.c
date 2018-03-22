@@ -1155,7 +1155,6 @@ RecordTransactionCommit(void)
 	bool		RelcacheInitFileInval = false;
 	bool		wrote_xlog;
 	bool		isDtxPrepared = 0;
-	bool		omitCommitRecordForDirtyQEReader;
 	TMGXACT_LOG gxact_log;
 	XLogRecPtr	recptr = {0,0};
 
@@ -1178,30 +1177,6 @@ RecordTransactionCommit(void)
 	wrote_xlog = (XactLastRecEnd.xrecoff != 0);
 
 	isDtxPrepared = isPreparedDtxTransaction();
-	omitCommitRecordForDirtyQEReader = false;
-	if (markXidCommitted)
-	{
-		/* Safety check in case our assumption is ever broken. */
-		if (Gp_role == GP_ROLE_EXECUTE && !Gp_is_writer && !seqXlogWrite)
-		{
-			/* with the introduction of the new DTM system, we have
-			 * more coherent state information, local-only changes
-			 * should be OK. */
-			if (DistributedTransactionContext == DTX_CONTEXT_LOCAL_ONLY)
-			{
-				/* MPP-1687: readers may under some circumstances extend the CLOG */
-				elog(LOG, "Reader qExec committing LOCAL-ONLY changes.");
-			}
-			else
-			{
-				/*
-				 * We are allowing the QE Reader to write to support error tables.
-				 */
-				elog(DEBUG1, "omitting logging commit record for Reader qExec that has written changes.");
-				omitCommitRecordForDirtyQEReader = true;
-			}
-		}
-	}
 	
 	/*
 	 * If we haven't been assigned an XID yet, we neither can, nor do we want
@@ -1221,54 +1196,6 @@ RecordTransactionCommit(void)
 		/* Can't have child XIDs either; AssignTransactionId enforces this */
 		Assert(nchildren == 0);
 
-		/* add global transaction information */
-		if (isDtxPrepared)
-		{
-			XLogRecData rdata[2];
-			xl_xact_commit xlrec;
-
-			SetCurrentTransactionStopTimestamp();
-			xlrec.xact_time = xactStopTimestamp;
-			xlrec.nrels = 0;
-			xlrec.nsubxacts = 0;
-			xlrec.nmsgs = 0;
-			rdata[0].data = (char *) (&xlrec);
-			rdata[0].len = MinSizeOfXactCommit;
-			rdata[0].buffer = InvalidBuffer;
-
-			getDtxLogInfo(&gxact_log);
-
-			rdata[0].next = &(rdata[1]);
-			rdata[1].data = (char *) &gxact_log;
-			rdata[1].len = sizeof(gxact_log);
-			rdata[1].buffer = InvalidBuffer;
-
-			rdata[1].next = NULL;
-
-			/*
-			 * Checkpoint process should hold off obtaining the REDO
-			 * pointer while a backend is writing distributed commit
-			 * xlog record and changing state of the distributed
-			 * trasaction.  Otherwise, it is possible that a commit
-			 * record is written by a transaction and the checkpointer
-			 * determines REDO pointer to be after this commit record.
-			 * But the transaction is yet to chance its state to
-			 * INSERTED_DISRIBUTED_COMMITTED and the checkpoint process
-			 * fails to record this transaction in the checkpoint.
-			 * Crash recovery will never see the commit record for this
-			 * transaction and the second phase of 2PC will never
-			 * happen.  The inCommit flag avoids the situation by
-			 * blocking checkpointer untill a backend has finished
-			 * updating the state.
-			 */
-			save_inCommit = MyProc->inCommit;
-			MyProc->inCommit = true;
-			insertingDistributedCommitted();
-			recptr = XLogInsert(RM_XACT_ID, XLOG_XACT_DISTRIBUTED_COMMIT, rdata);
-			insertedDistributedCommitted();
-			MyProc->inCommit = save_inCommit;
-		}
-
 		/*
 		 * If we didn't create XLOG entries, we're done here; otherwise we
 		 * should flush those entries the same as a commit record.	(An
@@ -1279,7 +1206,12 @@ RecordTransactionCommit(void)
 		if (!isDtxPrepared && !wrote_xlog)
 			goto cleanup;
 	}
-	else
+	/*
+	 * A QD may write distributed commit record even when it didn't have a
+	 * valid local XID if the distributed transaction changed data only on
+	 * segments (e.g. DML statement).
+	 */
+	if (markXidCommitted || isDtxPrepared)
 	{
 		/*
 		 * Begin commit critical section and insert the commit XLOG record.
@@ -1319,6 +1251,19 @@ RecordTransactionCommit(void)
 		 * holding the ProcArrayLock, since we're the only one modifying it.
 		 * This makes checkpoint's determination of which xacts are inCommit a
 		 * bit fuzzy, but it doesn't matter.
+		 *
+		 * In GPDB, if this is a distributed transaction, checkpoint process
+		 * should hold off obtaining the REDO pointer while a backend is
+		 * writing distributed commit xlog record and changing state of the
+		 * distributed trasaction.  Otherwise, it is possible that a commit
+		 * record is written by a transaction and the checkpointer determines
+		 * REDO pointer to be after this commit record.  But the transaction is
+		 * yet to change its state to INSERTED_DISRIBUTED_COMMITTED and the
+		 * checkpoint process fails to record this transaction in the
+		 * checkpoint.  Crash recovery will never see the commit record for
+		 * this transaction and the second phase of 2PC will never happen.  The
+		 * inCommit flag avoids this situation by blocking checkpointer until a
+		 * backend has finished updating the state.
 		 */
 		START_CRIT_SECTION();
 		save_inCommit = MyProc->inCommit;
@@ -1454,12 +1399,6 @@ RecordTransactionCommit(void)
 		}
 #endif
 
-		/*
-		 * Now we may update the CLOG, if we wrote COMMIT record above
-		 */
-		if (max_wal_senders > 0)
-			WalSndWakeup();
-
 		if (isDtxPrepared)
 			forcedDistributedCommitted(&recptr);
 
@@ -1472,6 +1411,9 @@ RecordTransactionCommit(void)
 
 		/*
 		 * Now we may update the CLOG, if we wrote a COMMIT record above
+		 *
+		 * Updaing CLOG and distributed log is not necessary on the QD if the
+		 * distributed transaction didn't make any writes on the QD.
 		 */
 		if (markXidCommitted)
 		{
@@ -1531,7 +1473,7 @@ RecordTransactionCommit(void)
 	 * If we entered a commit critical section, leave it now, and let
 	 * checkpoints proceed.
 	 */
-	if (markXidCommitted)
+	if (markXidCommitted || isDtxPrepared)
 	{
 		MyProc->inCommit = save_inCommit;
 		END_CRIT_SECTION();
@@ -1543,7 +1485,7 @@ RecordTransactionCommit(void)
 	 * Note that at this stage we have marked clog, but still show as running
 	 * in the procarray and continue to hold locks.
 	 */
-	if (markXidCommitted)
+	if (markXidCommitted || isDtxPrepared)
 	{
 		Assert(recptr.xrecoff != 0);
 		SyncRepWaitForLSN(recptr);
@@ -2445,7 +2387,6 @@ CommitTransaction(void)
 	TransactionState s = CurrentTransactionState;
 	TransactionId latestXid;
 
-	TransactionId localXid;
 	bool needNotifyCommittedDtxTransaction = false;
 
 	ShowTransactionState("CommitTransaction");
@@ -2563,20 +2504,6 @@ CommitTransaction(void)
 	 * commit processing
 	 */
 	s->state = TRANS_COMMIT;
-
-	/*
-	 * If we're a QE reader, we share the same top-level as the QE writer, but we
-	 * should't write a commit record because the QE writer will do that. We also
-	 * haven't advertised that XID in the proc array, so we don't need to clean
-	 * that up here either.
-	 */
-	if (DistributedTransactionContext == DTX_CONTEXT_QE_READER ||
-		DistributedTransactionContext == DTX_CONTEXT_QE_ENTRY_DB_SINGLETON)
-	{
-		localXid = InvalidTransactionId;
-	}
-	else
-		localXid = GetTopTransactionIdIfAny();
 
 	/*
 	 * Here is where we really truly commit.
@@ -3049,8 +2976,6 @@ AbortTransaction(void)
 	TransactionState s = CurrentTransactionState;
 	TransactionId latestXid;
 
-	TransactionId localXid = GetTopTransactionIdIfAny();
-
 	SIMPLE_FAULT_INJECTOR(AbortTransactionFail);
 
 	/* Prevent cancel/die interrupt while cleaning up */
@@ -3125,15 +3050,6 @@ AbortTransaction(void)
 	AtAbort_Notify();
 	AtEOXact_RelationMap(false);
 	AtAbort_Twophase();
-
-	/* Like in CommitTransaction(), treat a QE reader as if there was no XID */
-	if (DistributedTransactionContext == DTX_CONTEXT_QE_READER ||
-		DistributedTransactionContext == DTX_CONTEXT_QE_ENTRY_DB_SINGLETON)
-	{
-		localXid = InvalidTransactionId;
-	}
-	else
-		localXid = GetTopTransactionIdIfAny();
 
 	/*
 	 * Advertise the fact that we aborted in pg_clog (assuming that we got as
