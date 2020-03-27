@@ -292,6 +292,13 @@ typedef struct MinimalTupleTableSlot
 	uint32		off;			/* saved state for slot_deform_heap_tuple */
 } MinimalTupleTableSlot;
 
+typedef struct MemTupleTableSlot
+{
+	TupleTableSlot base;
+	MemTupleBinding *binding;
+	MemTuple tuple;
+} MemTupleTableSlot;
+
 /*
  * TupIsNull -- is a TupleTableSlot empty?
  */

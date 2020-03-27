@@ -56,32 +56,123 @@ static void reform_and_rewrite_tuple(HeapTuple tuple,
 
 static const TableAmRoutine appendonly_methods;
 
-
 /* ------------------------------------------------------------------------
  * Slot related callbacks for appendonly AM
  * ------------------------------------------------------------------------
  */
 
-/* GPDB_12_MERGE_FIXME: not implemented yet */
+static void tts_memtuple_init(TupleTableSlot *slot);
+static void tts_memtuple_release(TupleTableSlot *slot);
+static void tts_memtuple_clear(TupleTableSlot *slot);
+static void	tts_memtuple_getsomeattrs(TupleTableSlot *slot, int natts);
+static Datum tts_memtuple_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull);
+static void tts_memtuple_materialize(TupleTableSlot *slot);
+static void tts_memtuple_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot);
+static HeapTuple tts_memtuple_get_heap_tuple(TupleTableSlot *slot);
+static HeapTuple tts_memtuple_copy_heap_tuple(TupleTableSlot *slot);
+static MinimalTuple tts_memtuple_copy_minimal_tuple(TupleTableSlot *slot);
+
 const TupleTableSlotOps TTSOpsMemTuple = {
-/* GPDB_12_MERGE_FIXME: not implemented yet */
-#if 0
-	.base_slot_size = sizeof(HeapTupleTableSlot),
-	.init = tts_heap_init,
-	.release = tts_heap_release,
-	.clear = tts_heap_clear,
-	.getsomeattrs = tts_heap_getsomeattrs,
-	.getsysattr = tts_heap_getsysattr,
-	.materialize = tts_heap_materialize,
-	.copyslot = tts_heap_copyslot,
-	.get_heap_tuple = tts_heap_get_heap_tuple,
+	.base_slot_size = sizeof(MemTupleTableSlot),
+	.init = tts_memtuple_init,
+	.release = tts_memtuple_release,
+	.clear = tts_memtuple_clear,
+	.getsomeattrs = tts_memtuple_getsomeattrs,
+	.getsysattr = tts_memtuple_getsysattr,
+	.materialize = tts_memtuple_materialize,
+	.copyslot = tts_memtuple_copyslot,
+	.get_heap_tuple = tts_memtuple_get_heap_tuple,
 
 	/* A heap tuple table slot can not "own" a minimal tuple. */
 	.get_minimal_tuple = NULL,
-	.copy_heap_tuple = tts_heap_copy_heap_tuple,
-	.copy_minimal_tuple = tts_heap_copy_minimal_tuple
-#endif
+	.copy_heap_tuple = tts_memtuple_copy_heap_tuple,
+	.copy_minimal_tuple = tts_memtuple_copy_minimal_tuple
 };
+
+static void
+tts_memtuple_init(TupleTableSlot *slot)
+{
+}
+
+static void
+tts_memtuple_release(TupleTableSlot *slot)
+{
+	elog(ERROR, "not implemented %s", __func__);
+}
+
+static void
+tts_memtuple_clear(TupleTableSlot *slot)
+{
+	slot->tts_flags |= TTS_FLAG_EMPTY;
+	if (TTS_SHOULDFREE(slot))
+	{
+		MemTupleTableSlot *mslot = (MemTupleTableSlot *) slot;
+		slot->tts_flags &= ~TTS_FLAG_SHOULDFREE;
+		destroy_memtuple_binding(mslot->binding);
+		pfree(mslot->tuple);
+	}
+}
+
+static void
+tts_memtuple_getsomeattrs(TupleTableSlot *slot, int natts)
+{
+	elog(ERROR, "not implemented %s", __func__);
+}
+
+static Datum
+tts_memtuple_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
+{
+	elog(ERROR, "not implemented %s", __func__);
+}
+
+static void
+tts_memtuple_materialize(TupleTableSlot *slot)
+{
+	elog(ERROR, "not implemented %s", __func__);
+}
+
+static void
+tts_memtuple_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
+{
+	if (dstslot->tts_ops != srcslot->tts_ops ||
+		TTS_SHOULDFREE(srcslot))
+	{
+		MemTupleTableSlot *mslot = (MemTupleTableSlot *) dstslot;
+		MemoryContext oldContext;
+		ExecClearTuple(dstslot);
+		dstslot->tts_flags |= TTS_FLAG_SHOULDFREE;
+		dstslot->tts_flags &= ~TTS_FLAG_EMPTY;
+		oldContext = MemoryContextSwitchTo(dstslot->tts_mcxt);
+		mslot = palloc(sizeof(dstslot->tts_ops->base_slot_size));
+		mslot->binding = create_memtuple_binding(srcslot->tts_tupleDescriptor);
+		if (!TTS_IS_VIRTUAL(srcslot))
+			srcslot->tts_ops->getsomeattrs(
+				srcslot, srcslot->tts_tupleDescriptor->natts);
+		mslot->tuple = memtuple_form(
+			mslot->binding, srcslot->tts_values, srcslot->tts_isnull);
+		MemoryContextSwitchTo(oldContext);
+	}
+	else
+		elog(ERROR, "not implemented %s", __func__);
+}
+
+static HeapTuple
+tts_memtuple_get_heap_tuple(TupleTableSlot *slot)
+{
+	elog(ERROR, "not implemented %s", __func__);
+}
+
+static HeapTuple
+tts_memtuple_copy_heap_tuple(TupleTableSlot *slot)
+{
+	elog(ERROR, "not implemented %s", __func__);
+}
+
+static MinimalTuple
+tts_memtuple_copy_minimal_tuple(TupleTableSlot *slot)
+{
+	elog(ERROR, "not implemented %s", __func__);
+}
 
 MemTuple
 ExecFetchSlotMemTuple(TupleTableSlot *slot, bool *shouldFree)
