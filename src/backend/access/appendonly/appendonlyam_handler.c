@@ -20,6 +20,7 @@
 
 #include "miscadmin.h"
 
+#include "access/appendonlywriter.h"
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/multixact.h"
@@ -55,6 +56,7 @@ static void reform_and_rewrite_tuple(HeapTuple tuple,
 									 Datum *values, bool *isnull, RewriteState rwstate);
 
 static const TableAmRoutine appendonly_methods;
+static AppendOnlyInsertDesc insertDesc = NULL;
 
 /* ------------------------------------------------------------------------
  * Slot related callbacks for appendonly AM
@@ -97,7 +99,12 @@ tts_memtuple_init(TupleTableSlot *slot)
 static void
 tts_memtuple_release(TupleTableSlot *slot)
 {
-	elog(ERROR, "not implemented %s", __func__);
+	tts_memtuple_clear(slot);
+	if (insertDesc)
+	{
+		appendonly_insert_finish(insertDesc);
+		insertDesc = NULL;
+	}
 }
 
 static void
@@ -128,7 +135,20 @@ tts_memtuple_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 static void
 tts_memtuple_materialize(TupleTableSlot *slot)
 {
-	elog(ERROR, "not implemented %s", __func__);
+	MemTupleTableSlot *mslot = (MemTupleTableSlot *) slot;
+	MemoryContext oldContext;
+
+	Assert(!TTS_EMPTY(slot));
+
+	if (!TTS_SHOULDFREE(slot))
+	{
+		slot->tts_flags |= TTS_FLAG_SHOULDFREE;
+		oldContext = MemoryContextSwitchTo(slot->tts_mcxt);
+		mslot->binding = create_memtuple_binding(slot->tts_tupleDescriptor);
+		mslot->tuple = memtuple_form(
+			mslot->binding, slot->tts_values, slot->tts_isnull);
+		MemoryContextSwitchTo(oldContext);
+	}
 }
 
 static void
@@ -143,11 +163,9 @@ tts_memtuple_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 		dstslot->tts_flags |= TTS_FLAG_SHOULDFREE;
 		dstslot->tts_flags &= ~TTS_FLAG_EMPTY;
 		oldContext = MemoryContextSwitchTo(dstslot->tts_mcxt);
-		mslot = palloc(sizeof(dstslot->tts_ops->base_slot_size));
 		mslot->binding = create_memtuple_binding(srcslot->tts_tupleDescriptor);
 		if (!TTS_IS_VIRTUAL(srcslot))
-			srcslot->tts_ops->getsomeattrs(
-				srcslot, srcslot->tts_tupleDescriptor->natts);
+			slot_getallattrs(srcslot);
 		mslot->tuple = memtuple_form(
 			mslot->binding, srcslot->tts_values, srcslot->tts_isnull);
 		MemoryContextSwitchTo(oldContext);
@@ -177,8 +195,10 @@ tts_memtuple_copy_minimal_tuple(TupleTableSlot *slot)
 MemTuple
 ExecFetchSlotMemTuple(TupleTableSlot *slot, bool *shouldFree)
 {
-	/* GPDB_12_MERGE_FIXME: dummy placeholder, to placate linker */
-	elog(ERROR, "ExecFetchSlotMemTuple not implemented");
+	Assert(slot->tts_ops == &TTSOpsMemTuple);
+	MemTupleTableSlot *mslot = (MemTupleTableSlot *) slot;
+	*shouldFree = false;
+	return mslot->tuple;
 }
 
 TupleTableSlot *
@@ -356,21 +376,14 @@ appendonly_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 {
 	bool		shouldFree = true;
 	MemTuple	mtuple = ExecFetchSlotMemTuple(slot, &shouldFree);
-	AppendOnlyInsertDesc insertDesc = NULL;
 
-	// GPDB_12_MERGE_FIXME: Where to store this?
-#if 0
-	if (resultRelInfo->ri_aoInsertDesc == NULL)
+	if (insertDesc == NULL)
 	{
-		/* Set the pre-assigned fileseg number to insert into */
-		ResultRelInfoSetSegno(resultRelInfo, estate->es_result_aosegnos);
-
-		resultRelInfo->ri_aoInsertDesc =
-			appendonly_insert_init(resultRelationDesc,
-								   resultRelInfo->ri_aosegno,
+		insertDesc = 
+			appendonly_insert_init(relation,
+								   ChooseSegnoForWrite(relation),
 								   false);
 	}
-#endif
 	
 	/* Update the tuple with table oid */
 	slot->tts_tableOid = RelationGetRelid(relation);

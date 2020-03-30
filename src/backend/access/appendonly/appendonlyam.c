@@ -813,7 +813,7 @@ AppendOnlyExecutorReadBlock_Init(AppendOnlyExecutorReadBlock *executorReadBlock,
 	AssertArg(MemoryContextIsValid(memoryContext));
 
 	oldcontext = MemoryContextSwitchTo(memoryContext);
-	executorReadBlock->uncompressedBuffer = (uint8 *) palloc(usableBlockSize * sizeof(uint8));
+	executorReadBlock->uncompressedBuffer = (uint8 *) palloc0(usableBlockSize * sizeof(uint8));
 
 	executorReadBlock->storageRead = storageRead;
 	executorReadBlock->memoryContext = memoryContext;
@@ -1002,8 +1002,6 @@ AppendOnlyExecutorReadBlock_ProcessTuple(AppendOnlyExecutorReadBlock *executorRe
 
 	if (slot)
 	{
-		bool		shouldFree = false;
-
 		/* If the tuple is not in the latest format, convert it */
 		// GPDB_12_MERGE_FIXME: Is pg_upgrade from old versions still a thing? Can we drop this?
 #if 0
@@ -1011,7 +1009,12 @@ AppendOnlyExecutorReadBlock_ProcessTuple(AppendOnlyExecutorReadBlock *executorRe
 			tuple = upgrade_tuple(executorReadBlock, tuple, slot->tts_mt_bind, formatVersion, &shouldFree);
 #endif
 
-		ExecStoreMemTuple(tuple, slot, shouldFree);
+		// MemTuple to values / nulls
+		ExecClearTuple(slot);
+		if (!executorReadBlock->mt_bind)
+			executorReadBlock->mt_bind = create_memtuple_binding(slot->tts_tupleDescriptor);
+		memtuple_deform(tuple, executorReadBlock->mt_bind, slot->tts_values, slot->tts_isnull);
+		(void) ExecStoreVirtualTuple(slot);
 		slot->tts_tid = fake_ctid;
 	}
 
