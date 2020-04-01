@@ -596,6 +596,21 @@ static inline unsigned char *memtuple_get_nullp(MemTuple mtup, MemTupleBinding *
 	return mtup->PRIVATE_mt_bits;
 }
 
+MemTuple
+memtuple_form_new(TupleDesc desc, Datum *values, bool *isnull)
+{
+	static MemTupleBinding *MTBindingCache = NULL;
+
+	if (!MTBindingCache || MTBindingCache->tupdesc != desc)
+	{
+		if (MTBindingCache)
+			pfree(MTBindingCache);
+		MTBindingCache = create_memtuple_binding(desc);
+		elog(WARNING, "created memtuple binding");
+	}
+	return memtuple_form(MTBindingCache, values, isnull);
+}
+
 /*
  * Form a memtuple from values and isnull. Returns a palloc'd tuple.
  *

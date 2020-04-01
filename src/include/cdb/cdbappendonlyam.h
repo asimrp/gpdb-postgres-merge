@@ -120,6 +120,7 @@ typedef struct AppendOnlyExecutorReadBlock
 
 	AppendOnlyStorageRead	*storageRead;
 
+	MemTupleBinding *mt_bind;
 	/*
 	 * When reading a segfile that's using version < AORelationVersion_PG83,
 	 * that is, was created before GPDB 5.0 and upgraded with pg_upgrade, we need

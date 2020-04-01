@@ -163,6 +163,9 @@ initscan(AppendOnlyScanDesc scan, ScanKey key)
 		AppendOnlyExecutorReadBlock_ResetCounts(
 												&scan->executorReadBlock);
 
+	scan->executorReadBlock.mt_bind =
+		create_memtuple_binding(RelationGetDescr(scan->aos_rd));
+
 	pgstat_count_heap_scan(scan->aos_rd);
 }
 
@@ -813,7 +816,7 @@ AppendOnlyExecutorReadBlock_Init(AppendOnlyExecutorReadBlock *executorReadBlock,
 	AssertArg(MemoryContextIsValid(memoryContext));
 
 	oldcontext = MemoryContextSwitchTo(memoryContext);
-	executorReadBlock->uncompressedBuffer = (uint8 *) palloc(usableBlockSize * sizeof(uint8));
+	executorReadBlock->uncompressedBuffer = (uint8 *) palloc0(usableBlockSize * sizeof(uint8));
 
 	executorReadBlock->storageRead = storageRead;
 	executorReadBlock->memoryContext = memoryContext;
@@ -1011,8 +1014,14 @@ AppendOnlyExecutorReadBlock_ProcessTuple(AppendOnlyExecutorReadBlock *executorRe
 			tuple = upgrade_tuple(executorReadBlock, tuple, slot->tts_mt_bind, formatVersion, &shouldFree);
 #endif
 
-		ExecStoreMemTuple(tuple, slot, shouldFree);
+		Assert(executorReadBlock->mt_bind);
+		
+		ExecClearTuple(slot);
+		memtuple_deform(tuple, executorReadBlock->mt_bind, slot->tts_values, slot->tts_isnull);
 		slot->tts_tid = fake_ctid;
+		if (shouldFree)
+			(slot)->tts_flags |= TTS_FLAG_SHOULDFREE;
+		ExecStoreVirtualTuple(slot);
 	}
 
 	/* skip visibility test, all tuples are visible */

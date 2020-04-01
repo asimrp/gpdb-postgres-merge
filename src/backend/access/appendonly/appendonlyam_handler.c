@@ -56,6 +56,8 @@ static void reform_and_rewrite_tuple(HeapTuple tuple,
 
 static const TableAmRoutine appendonly_methods;
 
+static AppendOnlyInsertDesc insertDesc = NULL;
+
 
 /* ------------------------------------------------------------------------
  * Slot related callbacks for appendonly AM
@@ -86,17 +88,34 @@ const TupleTableSlotOps TTSOpsMemTuple = {
 MemTuple
 ExecFetchSlotMemTuple(TupleTableSlot *slot, bool *shouldFree)
 {
-	/* GPDB_12_MERGE_FIXME: dummy placeholder, to placate linker */
-	elog(ERROR, "ExecFetchSlotMemTuple not implemented");
+	MemTuple result;
+	MemoryContext oldContext;
+
+	/*
+	 * VirtualTupleTableSlot interface has no way to free the MemTuple, the
+	 * caller needs to free it.
+	 */
+	*shouldFree = true;
+
+	oldContext = MemoryContextSwitchTo(slot->tts_mcxt);
+	result = memtuple_form_new(
+		slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
+	MemoryContextSwitchTo(oldContext);
+	return result;
 }
 
 TupleTableSlot *
 ExecStoreMemTuple(MemTuple tuple,
+				  MemTupleBinding *mt_bind,
 				  TupleTableSlot *slot,
 				  bool shouldFree)
 {
-	/* GPDB_12_MERGE_FIXME: dummy placeholder, to placate linker */
-	elog(ERROR, "ExecStoreMemTuple not implemented");
+	ExecClearTuple(slot);
+	memtuple_deform(tuple, mt_bind, slot->tts_values, slot->tts_isnull);
+	if (shouldFree)
+		(slot)->tts_flags |= TTS_FLAG_SHOULDFREE;
+	
+	(slot)->tts_flags &= ~TTS_FLAG_EMPTY;
 }
 
 MemTuple
@@ -118,7 +137,7 @@ ExecForceStoreMemTuple(MemTuple mtup, TupleTableSlot *slot,
 static const TupleTableSlotOps *
 appendonly_slot_callbacks(Relation relation)
 {
-	return &TTSOpsMemTuple;
+	return &TTSOpsVirtual;
 }
 
 /* ------------------------------------------------------------------------
@@ -265,11 +284,7 @@ appendonly_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 {
 	bool		shouldFree = true;
 	MemTuple	mtuple = ExecFetchSlotMemTuple(slot, &shouldFree);
-	AppendOnlyInsertDesc insertDesc = NULL;
 
-	// GPDB_12_MERGE_FIXME: Where to store this?
-#if 0
-	if (resultRelInfo->ri_aoInsertDesc == NULL)
 	{
 		/* Set the pre-assigned fileseg number to insert into */
 		ResultRelInfoSetSegno(resultRelInfo, estate->es_result_aosegnos);
@@ -279,7 +294,6 @@ appendonly_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 								   resultRelInfo->ri_aosegno,
 								   false);
 	}
-#endif
 	
 	/* Update the tuple with table oid */
 	slot->tts_tableOid = RelationGetRelid(relation);
